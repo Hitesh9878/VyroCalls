@@ -17,6 +17,11 @@ const userSchema = new mongoose.Schema(
     // (no default: accounts created before OTP existed have no value and may still sign in)
     emailVerified: { type: Boolean },
 
+    // Profile: a small square JPEG/PNG/WebP stored as a data URL (the client shrinks it to ~128px),
+    // and a short "about" line shown to contacts
+    avatar: { type: String, default: '', maxlength: 30000 },
+    about: { type: String, default: '', trim: true, maxlength: 140 },
+
     // People I have blocked: they can't call me, invite me or send me requests
     blocked: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 
@@ -37,7 +42,13 @@ userSchema.methods.comparePassword = function (plain) {
 };
 
 userSchema.methods.toPublic = function () {
-  return { id: this._id.toString(), name: this.name, email: this.email };
+  return {
+    id: this._id.toString(),
+    name: this.name,
+    email: this.email,
+    avatar: this.avatar || '',
+    about: this.about || '',
+  };
 };
 
 module.exports = mongoose.model('User', userSchema);

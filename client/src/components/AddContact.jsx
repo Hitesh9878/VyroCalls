@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import api, { errorMessage } from '../services/api';
 import { Check, Search, UserPlus } from './Icons';
+import Avatar from './Avatar';
 import './AddContact.css';
 
 const LABELS = { contact: 'In your contacts', sent: 'Request sent', received: 'Wants to connect — see Requests', blocked: 'Blocked' };
@@ -76,7 +77,7 @@ export default function AddContact({ onChanged }) {
 
       {results.map((p) => (
         <div className="add-contact-result" key={p.id}>
-          <div className="avatar">{p.name.charAt(0)}</div>
+          <Avatar user={p} />
           <div className="add-contact-who">
             <div className="contact-name">{p.name}</div>
             <div className="contact-email">{p.email}</div>

@@ -7,7 +7,7 @@ const has = (list, id) => (list || []).some((x) => x.toString() === id);
 // accepted) and neither may have blocked the other.
 async function checkCallAllowed(callerId, calleeId) {
   const [users, links] = await Promise.all([
-    User.find({ _id: { $in: [callerId, calleeId] } }).select('name email blocked'),
+    User.find({ _id: { $in: [callerId, calleeId] } }).select('name email avatar blocked'),
     Contact.countDocuments({
       $or: [
         { owner: callerId, contact: calleeId },

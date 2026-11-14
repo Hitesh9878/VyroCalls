@@ -24,6 +24,12 @@ export function AuthProvider({ children }) {
     setUser(newUser);
   }, []);
 
+  // After the profile was edited: keep the new details in memory and in the saved session
+  const updateUser = useCallback((newUser) => {
+    localStorage.setItem('user', JSON.stringify(newUser));
+    setUser(newUser);
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
@@ -59,7 +65,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, checking, login, register, verifyEmail, logout }}>
+    <AuthContext.Provider value={{ user, token, checking, login, register, verifyEmail, logout, updateUser }}>
       {children}
     </AuthContext.Provider>
   );

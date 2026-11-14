@@ -1,6 +1,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const User = require('../models/User');
+const Contact = require('../models/Contact');
 const Otp = require('../models/Otp');
 const { signToken, requireAuth } = require('../middleware/auth');
 const { sendOtp } = require('../services/mailer');
@@ -203,6 +204,80 @@ router.get('/me', requireAuth, async (req, res) => {
   const user = await User.findById(req.user.id);
   if (!user) return res.status(404).json({ message: 'User not found' });
   res.json({ user: user.toPublic() });
+});
+
+// ---- Profile ---------------------------------------------------------------------------
+// The client shrinks the photo to a small square before uploading; this only accepts a small image data URL.
+const AVATAR_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+const MAX_AVATAR_CHARS = 30000;
+
+router.patch('/profile', requireAuth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const { name, about, avatar } = req.body;
+
+    if (name !== undefined) {
+      const clean = String(name).trim();
+      if (!clean) return res.status(400).json({ message: 'Name cannot be empty' });
+      if (clean.length > 60) return res.status(400).json({ message: 'Name can be at most 60 characters' });
+      user.name = clean;
+    }
+    if (about !== undefined) {
+      const clean = String(about).trim();
+      if (clean.length > 140) return res.status(400).json({ message: 'About can be at most 140 characters' });
+      user.about = clean;
+    }
+    if (avatar !== undefined) {
+      if (avatar === '' || avatar === null) {
+        user.avatar = '';
+      } else if (typeof avatar !== 'string' || !AVATAR_RE.test(avatar) || avatar.length > MAX_AVATAR_CHARS) {
+        return res.status(400).json({ message: 'Please choose a smaller JPEG, PNG or WebP image' });
+      } else {
+        user.avatar = avatar;
+      }
+    }
+
+    await user.save();
+
+    // Everyone who has me as a contact reloads their list so the new name / photo shows up
+    const io = req.app.get('io');
+    if (io) {
+      const rows = await Contact.find({ contact: user._id }).select('owner');
+      rows.forEach((r) => io.to(`user:${r.owner.toString()}`).emit('contacts:updated'));
+    }
+
+    res.json({ user: user.toPublic() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Could not update your profile' });
+  }
+});
+
+router.post('/change-password', requireAuth, otpLimiter, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: 'Enter your current and your new password' });
+    }
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({ message: 'New password must be at least 6 characters' });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!(await user.comparePassword(currentPassword))) {
+      return res.status(400).json({ message: 'Your current password is not correct' });
+    }
+
+    user.password = newPassword; // hashed by the pre-save hook
+    await user.save();
+    res.json({ message: 'Password updated.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Could not change your password' });
+  }
 });
 
 module.exports = router;

@@ -6,6 +6,7 @@ const Contact = require('../models/Contact');
 const ContactRequest = require('../models/ContactRequest');
 const presence = require('../presence');
 const { requireAuth } = require('../middleware/auth');
+const { sendRequestReceived, sendRequestAccepted, sendRequestDeclined } = require('../services/mailer');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -18,7 +19,7 @@ const searchLimiter = rateLimit({
   message: { message: 'Too many searches. Please slow down.' },
 });
 
-const pub = (u) => ({ id: u._id.toString(), name: u.name, email: u.email });
+const pub = (u) => ({ id: u._id.toString(), name: u.name, email: u.email, avatar: u.avatar || '', about: u.about || '' });
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const validId = (id) => mongoose.isValidObjectId(id);
 
@@ -27,6 +28,36 @@ const refresh = (req, ...userIds) => {
   const io = req.app.get('io');
   if (io) userIds.forEach((id) => io.to(`user:${id}`).emit('contacts:updated'));
 };
+
+// ---- Emails + live toasts for contact requests ----------------------------------------------
+// At most one email per kind per pair every REQUEST_EMAIL_COOLDOWN_MS, so send / cancel / send again
+// (or decline / re-request) loops cannot be used to spam someone's inbox.
+const REQUEST_EMAIL_COOLDOWN_MS = Number(process.env.REQUEST_EMAIL_COOLDOWN_MS) || 5 * 60 * 1000;
+const lastRequestEmail = new Map(); // "kind:actorId:targetId" -> time of the last email
+const MAILERS = { received: sendRequestReceived, accepted: sendRequestAccepted, declined: sendRequestDeclined };
+const appLink = () => (process.env.CLIENT_ORIGIN || 'http://localhost:5173').replace(/\/$/, '');
+
+// kind: 'received' (actor sent target a request) | 'accepted' | 'declined' (actor answered target's request).
+// Fire-and-forget: a mail problem must never break the request itself.
+async function notifyRequest(req, kind, actorId, targetId) {
+  try {
+    const users = await User.find({ _id: { $in: [actorId, targetId] } }).select('name email');
+    const actor = users.find((u) => u.id === String(actorId));
+    const target = users.find((u) => u.id === String(targetId));
+    if (!actor || !target) return;
+
+    const io = req.app.get('io');
+    if (io) io.to(`user:${targetId}`).emit('request:update', { type: kind, name: actor.name });
+
+    const key = `${kind}:${actorId}:${targetId}`;
+    if (Date.now() - (lastRequestEmail.get(key) || 0) < REQUEST_EMAIL_COOLDOWN_MS) return;
+    lastRequestEmail.set(key, Date.now());
+
+    await MAILERS[kind]({ to: target.email, name: target.name, otherName: actor.name, link: appLink() });
+  } catch (err) {
+    console.error(`Contact request (${kind}) email failed:`, err.message);
+  }
+}
 
 // Both directions, so a contact is always mutual
 async function makeContacts(a, b) {
@@ -52,7 +83,7 @@ async function isBlockedEitherWay(meId, otherId) {
 
 // ---- Contacts (accepted, mutual) -----------------------------------------
 router.get('/', async (req, res) => {
-  const docs = await Contact.find({ owner: req.user.id }).populate('contact', 'name email').sort({ createdAt: -1 });
+  const docs = await Contact.find({ owner: req.user.id }).populate('contact', 'name email avatar about').sort({ createdAt: -1 });
   res.json({
     contacts: docs
       .filter((d) => d.contact)
@@ -75,7 +106,7 @@ router.get('/search', searchLimiter, async (req, res) => {
       emailVerified: { $ne: false },
       $or: [{ email: q.toLowerCase() }, { name: new RegExp(escapeRegex(q), 'i') }],
     })
-      .select('name email')
+      .select('name email avatar about')
       .limit(10);
 
     const ids = found.map((u) => u._id);
@@ -112,8 +143,8 @@ router.get('/search', searchLimiter, async (req, res) => {
 router.get('/requests', async (req, res) => {
   const me = req.user.id;
   const [incoming, outgoing] = await Promise.all([
-    ContactRequest.find({ to: me }).populate('from', 'name email').sort({ createdAt: -1 }),
-    ContactRequest.find({ from: me }).populate('to', 'name email').sort({ createdAt: -1 }),
+    ContactRequest.find({ to: me }).populate('from', 'name email avatar about').sort({ createdAt: -1 }),
+    ContactRequest.find({ from: me }).populate('to', 'name email avatar about').sort({ createdAt: -1 }),
   ]);
   res.json({
     incoming: incoming.filter((r) => r.from).map((r) => ({ id: r._id.toString(), user: pub(r.from), createdAt: r.createdAt })),
@@ -150,11 +181,13 @@ router.post('/requests', async (req, res) => {
       await makeContacts(me, userId);
       await reverse.deleteOne();
       refresh(req, me, userId);
+      notifyRequest(req, 'accepted', me, userId);
       return res.status(201).json({ status: 'accepted' });
     }
 
     await ContactRequest.create({ from: me, to: userId });
     refresh(req, me, userId);
+    notifyRequest(req, 'received', me, userId);
     res.status(201).json({ status: 'sent' });
   } catch (err) {
     console.error(err);
@@ -180,6 +213,7 @@ router.post('/requests/:id/accept', async (req, res) => {
     await makeContacts(me, from);
     await reqDoc.deleteOne();
     refresh(req, me, from);
+    notifyRequest(req, 'accepted', me, from);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -187,11 +221,14 @@ router.post('/requests/:id/accept', async (req, res) => {
   }
 });
 
-// Decline an incoming request (the sender isn't told) or cancel one I sent
+// Decline an incoming request (the sender is emailed) or cancel one I sent (nobody is told)
 router.post('/requests/:id/decline', async (req, res) => {
   if (!validId(req.params.id)) return res.json({ ok: true });
   const doc = await ContactRequest.findOneAndDelete({ _id: req.params.id, to: req.user.id });
-  if (doc) refresh(req, req.user.id, doc.from.toString());
+  if (doc) {
+    refresh(req, req.user.id, doc.from.toString());
+    notifyRequest(req, 'declined', req.user.id, doc.from.toString());
+  }
   res.json({ ok: true });
 });
 
@@ -204,7 +241,7 @@ router.delete('/requests/:id', async (req, res) => {
 
 // ---- Blocking ------------------------------------------------------------
 router.get('/blocked', async (req, res) => {
-  const me = await User.findById(req.user.id).populate('blocked', 'name email');
+  const me = await User.findById(req.user.id).populate('blocked', 'name email avatar about');
   res.json({ blocked: (me?.blocked || []).filter(Boolean).map(pub) });
 });
 

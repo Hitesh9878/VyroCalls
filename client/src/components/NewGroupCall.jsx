@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Phone, Video, X } from './Icons';
+import Avatar from './Avatar';
 import './NewGroupCall.css';
 
 const MAX_INVITEES = 5; // up to 6 people including you
@@ -33,7 +34,7 @@ export default function NewGroupCall({ contacts, online, onStart, onClose }) {
           {sorted.map((c) => (
             <label className="ngc-item" key={c.id}>
               <input type="checkbox" checked={picked.includes(c.user.id)} onChange={() => toggle(c.user.id)} />
-              <div className="avatar">{c.user.name.charAt(0)}</div>
+              <Avatar user={c.user} />
               <div className="ngc-name">
                 {c.user.name}
                 <span className={`ngc-state ${online.has(c.user.id) ? 'on' : ''}`}>

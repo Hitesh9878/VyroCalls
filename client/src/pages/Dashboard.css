@@ -20,7 +20,34 @@
 }
 
 .dashboard-user-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-weight: 700;
+}
+
+.dashboard-profile-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 4px 10px 4px 4px;
+  background: none;
+  border: none;
+  border-radius: 12px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dashboard-profile-btn:hover {
+  background: var(--surface);
+}
+
+.dashboard-profile-btn svg {
+  flex-shrink: 0;
+  color: var(--muted);
 }
 
 .dashboard-user-email {

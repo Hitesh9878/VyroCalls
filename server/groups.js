@@ -22,7 +22,7 @@ const userTarget = (io, id) => io.to(`user:${id}`);
 const appLink = () => (process.env.CLIENT_ORIGIN || 'http://localhost:5173').replace(/\/$/, '');
 
 const memberList = (room) =>
-  [...room.members].map(([id, m]) => ({ id, name: m.name, status: m.status }));
+  [...room.members].map(([id, m]) => ({ id, name: m.name, avatar: m.avatar || '', status: m.status }));
 
 function emitToJoined(io, room, event, payload, exceptId) {
   for (const [id, m] of room.members) {
@@ -32,7 +32,7 @@ function emitToJoined(io, room, event, payload, exceptId) {
 
 function announce(io, room, userId) {
   const m = room.members.get(userId);
-  emitToJoined(io, room, 'group:member', { roomId: room.id, userId, name: m.name, status: m.status }, userId);
+  emitToJoined(io, room, 'group:member', { roomId: room.id, userId, name: m.name, avatar: m.avatar || '', status: m.status }, userId);
 }
 
 const logRecord = (room, userId, extra = {}) => ({
@@ -112,8 +112,8 @@ function register(io, socket, { isBusyOneToOne }) {
 
     try {
       const [meDoc, others, links] = await Promise.all([
-        User.findById(me.id).select('name email blocked'),
-        User.find({ _id: { $in: ids } }).select('name email blocked'),
+        User.findById(me.id).select('name email avatar blocked'),
+        User.find({ _id: { $in: ids } }).select('name email avatar blocked'),
         Contact.find({
           $or: [
             { owner: me.id, contact: { $in: ids } },
@@ -146,11 +146,12 @@ function register(io, socket, { isBusyOneToOne }) {
         id: crypto.randomUUID(),
         host: me.id,
         hostName: meDoc.name,
+        hostAvatar: meDoc.avatar || '',
         callType: type,
         startedAt: new Date(),
         members: new Map(),
       };
-      room.members.set(me.id, { name: meDoc.name, status: 'joined', joinedAt: new Date() });
+      room.members.set(me.id, { name: meDoc.name, avatar: meDoc.avatar || '', status: 'joined', joinedAt: new Date() });
       rooms.set(room.id, room);
       userRoom.set(me.id, room.id);
 
@@ -164,10 +165,10 @@ function register(io, socket, { isBusyOneToOne }) {
 
       allowed.forEach((u) => {
         const timer = setTimeout(() => expireInvite(io, room, u.id), INVITE_TIMEOUT_MS);
-        room.members.set(u.id, { name: u.name, status: 'pending', timer });
+        room.members.set(u.id, { name: u.name, avatar: u.avatar || '', status: 'pending', timer });
         userTarget(io, u.id).emit('group:invite', {
           roomId: room.id,
-          from: { id: me.id, name: meDoc.name },
+          from: { id: me.id, name: meDoc.name, avatar: meDoc.avatar || '' },
           callType: type,
           size: allowed.length + 1,
         });
@@ -188,7 +189,7 @@ function register(io, socket, { isBusyOneToOne }) {
       if (m && m.status === 'pending') {
         socket.emit('group:invite', {
           roomId: room.id,
-          from: { id: room.host, name: room.hostName },
+          from: { id: room.host, name: room.hostName, avatar: room.hostAvatar || '' },
           callType: room.callType,
           size: room.members.size,
         });

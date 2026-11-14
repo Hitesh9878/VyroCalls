@@ -134,7 +134,34 @@ client/src/
 - **Recording** happens in the browser and is saved to the recorder's own device; nothing is uploaded. Both voices are mixed into one track. For video calls the other person's video is recorded, not your own camera. The other person is shown a banner while you record, but laws on recording calls vary by country and region, so make sure your users get any consent they need. Output is `.webm` (Chrome, Edge, Firefox) or `.mp4` (Safari).
 - **Emails and quota**: one call can cause up to two emails (calling + missed). Both are limited to one per caller → callee pair per `CALL_EMAIL_COOLDOWN_MS`, but watch your Brevo daily limit.
 - **Search privacy**: search matches names (contains) or an exact email, needs 2+ characters, is rate limited, and never shows people who blocked you. If you want people to be findable only by exact email, change the `$or` in `routes/contacts.js`.
-- **OTP security**: only an HMAC of each code is stored; codes are single-use, expire in 10 minutes and lock after 5 wrong attempts. Requests are rate limited (20 per 15 minutes per IP). If the server sits behind a reverse proxy, add `app.set('trust proxy', 1)` in `server/index.js` so the limiter sees real client IPs. Accounts that existed before OTP was added can still sign in. Resetting a password does **not** sign out existing sessions: login tokens are stateless and stay valid for their 7 days.
+- **OTP security**: only an HMAC of each code is stored; codes are single-use, expire in 10 minutes and lock after 5 wrong attempts. Requests are rate limited (20 per 15 minutes per IP). The server sets `trust proxy` itself (`TRUST_PROXY=1`, set it to `0` if you run without a proxy) so the limiter sees real client IPs behind Render / nginx. Accounts that existed before OTP was added can still sign in. Resetting a password does **not** sign out existing sessions: login tokens are stateless and stay valid for their 7 days.
+
+## Calls that stay on "Connecting" (TURN relay, required on Render + mobile)
+
+Two phones on mobile data (or any two networks with strict NAT) cannot reach each other directly. Without a **TURN relay** the call sits on *Connecting* and then fails. Render cannot host one (it has no UDP), so use a TURN service and give the server its credentials. `GET /api/calls/ice-servers` hands them to the browser, so nothing is baked into the client build.
+
+Pick **one** and set it in the Render environment for the server, then redeploy:
+
+```
+# Metered.ca (free tier available): the server fetches fresh credentials itself
+METERED_DOMAIN=yourapp.metered.live
+METERED_API_KEY=...
+
+# or any TURN server (coturn, Twilio, Cloudflare ...)
+TURN_URLS=turn:host:3478,turns:host:5349
+TURN_USERNAME=...
+TURN_CREDENTIAL=...
+```
+
+The server logs a warning at start-up when none is set, and the call screen says so if a call cannot connect. Also set `VITE_API_URL` and `VITE_SERVER_URL` when you build the client for production.
+
+## Mobile reliability, profile and notifications
+
+- **Dropped connections**: a connected call waits `DISCONNECT_GRACE_MS` (20 s) for a phone's socket to come back instead of hanging up, the caller restarts ICE after a network change (Wi-Fi to 4G), and the screen stays awake during a call.
+- **Profile**: tap your name or photo in the header to change your photo, name, "about" line and password. Photos are shrunk in the browser to about 128 px and stored in MongoDB.
+- **Switch camera**: the flip button appears on video calls when the device has more than one camera.
+- **Audio output**: the speaker button lists the outputs the browser exposes (speaker, headphones, Bluetooth) where `setSinkId` is supported (Chrome / Edge, most Android). Safari / iOS do not allow this from a web page; the button explains that and the output is chosen with the device's own controls.
+- **Contact request emails**: the person you ask gets an email, and you get one when they accept or decline (one per kind per pair every `REQUEST_EMAIL_COOLDOWN_MS`, default 5 min). Declining is no longer silent.
 
 ## Production build
 

@@ -1,11 +1,12 @@
 import { Phone, PhoneOff } from './Icons';
+import Avatar from './Avatar';
 import './IncomingCall.css';
 
 export default function IncomingCall({ peer, callType, label, onAccept, onReject }) {
   return (
     <div className="incoming-backdrop">
       <div className="incoming-card">
-        <div className="avatar avatar-lg">{peer.name.charAt(0)}</div>
+        <Avatar user={peer} className="avatar-lg" />
         <div className="incoming-name">{peer.name}</div>
         <div className="incoming-type">{label || `Incoming ${callType} call…`}</div>
 

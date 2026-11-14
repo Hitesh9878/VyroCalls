@@ -19,14 +19,16 @@ import NotifyBanner from '../components/NotifyBanner';
 import RequestsPanel from '../components/RequestsPanel';
 import GroupCallScreen from '../components/GroupCallScreen';
 import NewGroupCall from '../components/NewGroupCall';
-import { Clock, LogOut, UserPlus, Users, Video } from '../components/Icons';
+import ProfilePanel from '../components/ProfilePanel';
+import Avatar from '../components/Avatar';
+import { Clock, LogOut, Pencil, UserPlus, Users, Video } from '../components/Icons';
 import Brand from '../components/Brand';
 import './Dashboard.css';
 
 const BANNER_KEY = 'notify-banner-dismissed';
 
 export default function Dashboard() {
-  const { user, logout } = useAuth();
+  const { user, logout, updateUser } = useAuth();
   const socket = useSocket();
   const call = useCall(socket);
   const group = useGroupCall(socket, user.id, { canRing: call.status === 'idle' });
@@ -37,6 +39,8 @@ export default function Dashboard() {
   const [requests, setRequests] = useState({ incoming: [], outgoing: [] });
   const [blocked, setBlocked] = useState([]);
   const [showGroupPicker, setShowGroupPicker] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
+  const [toast, setToast] = useState(''); // "X accepted your contact request" etc.
   const [online, setOnline] = useState(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -112,6 +116,29 @@ export default function Dashboard() {
     };
   }, [socket, loadCalls, loadPeople]);
 
+  // Someone sent / accepted / declined a contact request: show a short message
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onRequestUpdate = ({ type, name }) => {
+      const who = name || 'Someone';
+      setToast(
+        type === 'received'
+          ? `${who} sent you a contact request.`
+          : type === 'accepted'
+          ? `${who} accepted your contact request.`
+          : `${who} declined your contact request.`
+      );
+    };
+    socket.on('request:update', onRequestUpdate);
+    return () => socket.off('request:update', onRequestUpdate);
+  }, [socket]);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const t = setTimeout(() => setToast(''), 5000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
   // Missed-call count in the tab title, e.g. "(2) Vyro Calls"
   useEffect(() => {
     setTitleBadge(missedUnseen);
@@ -171,11 +198,15 @@ export default function Dashboard() {
       <header className="dashboard-header">
         <div className="dashboard-user">
           <Brand variant="icon" />
-          <div className="avatar">{user.name.charAt(0)}</div>
-          <div style={{ minWidth: 0 }}>
-            <div className="dashboard-user-name">{user.name}</div>
-            <div className="dashboard-user-email">{user.email}</div>
-          </div>
+          <button className="dashboard-profile-btn" title="Edit profile" onClick={() => setShowProfile(true)}>
+            <Avatar user={user} />
+            <div style={{ minWidth: 0 }}>
+              <div className="dashboard-user-name">
+                {user.name} <Pencil size={13} />
+              </div>
+              <div className="dashboard-user-email">{user.email}</div>
+            </div>
+          </button>
         </div>
         <button className="btn btn-ghost" onClick={logout}>
           <LogOut size={18} /> Log out
@@ -254,7 +285,8 @@ export default function Dashboard() {
             calls={calls}
             online={online}
             busy={inCall || !socket}
-            onCall={call.startCall}
+            // Use the contact's full details (photo) when we have them
+            onCall={(peer, type) => call.startCall(contacts.find((c) => c.user.id === peer.id)?.user || peer, type)}
           />
         )}
       </div>
@@ -267,6 +299,8 @@ export default function Dashboard() {
           onClose={() => setShowGroupPicker(false)}
         />
       )}
+
+      {showProfile && <ProfilePanel user={user} onSaved={updateUser} onClose={() => setShowProfile(false)} />}
 
       {group.status === 'incoming' && group.invite && (
         <IncomingCall
@@ -283,6 +317,7 @@ export default function Dashboard() {
           callType={group.room.callType}
           myId={user.id}
           myName={user.name}
+          myAvatar={user.avatar}
           members={group.members}
           streams={group.streams}
           localStream={group.localStream}
@@ -290,6 +325,9 @@ export default function Dashboard() {
           cameraOff={group.cameraOff}
           onToggleMute={group.toggleMute}
           onToggleCamera={group.toggleCamera}
+          facing={group.facing}
+          canSwitchCamera={group.canSwitchCamera}
+          onSwitchCamera={group.switchCamera}
           onLeave={group.leave}
         />
       )}
@@ -315,6 +353,10 @@ export default function Dashboard() {
           recording={call.recording}
           peerRecording={call.peerRecording}
           calleeOffline={call.calleeOffline}
+          reconnecting={call.reconnecting}
+          facing={call.facing}
+          canSwitchCamera={call.canSwitchCamera}
+          onSwitchCamera={call.switchCamera}
           onToggleMute={call.toggleMute}
           onToggleCamera={call.toggleCamera}
           onToggleRecording={call.toggleRecording}
@@ -322,7 +364,7 @@ export default function Dashboard() {
         />
       )}
 
-      {(call.notice || group.notice) && <div className="toast">{call.notice || group.notice}</div>}
+      {(call.notice || group.notice || toast) && <div className="toast">{call.notice || group.notice || toast}</div>}
     </div>
   );
 }

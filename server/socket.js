@@ -11,6 +11,9 @@ const groups = require('./groups');
 // longer: they have to read the email, open the app and sign in.
 const RING_TIMEOUT_MS = Number(process.env.RING_TIMEOUT_MS) || 30000;
 const OFFLINE_RING_TIMEOUT_MS = Number(process.env.OFFLINE_RING_TIMEOUT_MS) || 60000;
+// A phone loses its socket when the screen locks, the tab is switched or Wi-Fi hands over to 4G.
+// A connected call is kept alive this long while the person's socket comes back.
+const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 20000;
 
 // "callerId:calleeId" -> time of the last "you are being called" email (stops email spam)
 const lastCallEmail = new Map();
@@ -21,6 +24,8 @@ const activeCalls = new Map();
 // userId -> call record, the same object for both people in the call.
 // { caller, callerInfo, callee, callType, offer, startedAt, answeredAt, delivered, pendingIce, timer }
 const records = new Map();
+// userId -> timer that ends their call if they do not reconnect in time
+const pendingDrops = new Map();
 
 const isBusy = (userId) => activeCalls.has(userId) || groups.isBusy(userId);
 
@@ -40,6 +45,12 @@ function setupSocket(io) {
   io.on('connection', (socket) => {
     const me = socket.user;
     socket.join(`user:${me.id}`);
+
+    // Back after a short drop: the call they were in carries on
+    if (pendingDrops.has(me.id)) {
+      clearTimeout(pendingDrops.get(me.id));
+      pendingDrops.delete(me.id);
+    }
     presence.add(me.id, socket.id);
 
     // Tell this client who is online, and everyone else that I'm online
@@ -65,7 +76,7 @@ function setupSocket(io) {
       if (isBusy(me.id)) return socket.emit('call:busy', { userId: calleeId, self: true });
 
       // Email the callee right away, whether they are online, offline or busy
-      notifyCalleeByEmail(me, check.callee, type);
+      notifyCalleeByEmail(check.caller, check.callee, type);
 
       if (isBusy(calleeId)) {
         saveCall(io, { caller: me.id, callee: calleeId, callType: type, startedAt: new Date(), answeredAt: null }, 'missed');
@@ -75,7 +86,8 @@ function setupSocket(io) {
       const online = presence.isOnline(calleeId);
       const rec = {
         caller: me.id,
-        callerInfo: { id: me.id, name: me.name, email: me.email },
+        // Read from the database (not the login token) so a renamed profile / new photo shows up straight away
+        callerInfo: { id: me.id, name: check.caller.name, email: check.caller.email, avatar: check.caller.avatar || '' },
         callee: calleeId,
         callType: type,
         offer,
@@ -131,6 +143,14 @@ function setupSocket(io) {
       to(peerId).emit('call:ice', { from: me.id, candidate });
     });
 
+    // Re-negotiation of a running call (ICE restart after a network change). Same relay for offer and answer.
+    socket.on('call:negotiate', ({ to: peerId, description } = {}) => {
+      if (!description || activeCalls.get(me.id) !== peerId) return;
+      const rec = records.get(me.id);
+      if (!rec || !rec.answeredAt) return;
+      to(peerId).emit('call:negotiate', { from: me.id, description });
+    });
+
     socket.on('call:reject', ({ to: callerId }) => {
       const rec = records.get(me.id);
       if (activeCalls.get(me.id) !== callerId || !rec || rec.callee !== me.id || rec.answeredAt) return;
@@ -160,17 +180,37 @@ function setupSocket(io) {
       const wentOffline = presence.remove(me.id, socket.id);
       if (!wentOffline) return;
 
-      groups.onUserOffline(io, me.id);
-
-      const peerId = activeCalls.get(me.id);
-      if (peerId) {
-        const rec = clearCall(me.id);
-        to(peerId).emit('call:ended', { from: me.id });
-        if (rec) saveCall(io, rec, rec.answeredAt ? 'completed' : 'missed');
-      }
       socket.broadcast.emit('presence:update', { userId: me.id, online: false });
+
+      // In a connected call (or a group call I joined): wait a moment for the socket to come back
+      // instead of hanging up on the other person.
+      const rec = records.get(me.id);
+      if ((rec && rec.answeredAt) || groups.isBusy(me.id)) {
+        clearTimeout(pendingDrops.get(me.id));
+        pendingDrops.set(
+          me.id,
+          setTimeout(() => {
+            pendingDrops.delete(me.id);
+            if (!presence.isOnline(me.id)) dropUser(io, me.id);
+          }, DISCONNECT_GRACE_MS)
+        );
+        return;
+      }
+      dropUser(io, me.id);
     });
   });
+}
+
+// The person is really gone: leave their group call and end their 1:1 call
+function dropUser(io, userId) {
+  groups.onUserOffline(io, userId);
+
+  const peerId = activeCalls.get(userId);
+  if (peerId) {
+    const rec = clearCall(userId);
+    io.to(`user:${peerId}`).emit('call:ended', { from: userId });
+    if (rec) saveCall(io, rec, rec.answeredAt ? 'completed' : 'missed');
+  }
 }
 
 // Ring the callee: send the offer and any ICE candidates the caller has produced so far

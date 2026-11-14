@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, PhoneOff, Video, VideoOff } from './Icons';
+import { FlipCamera, Mic, MicOff, PhoneOff, Video, VideoOff } from './Icons';
+import Avatar from './Avatar';
+import AudioOutputMenu from './AudioOutputMenu';
+import useAudioOutput, { applySink } from '../hooks/useAudioOutput';
 import './GroupCallScreen.css';
 
 function formatTime(total) {
@@ -8,12 +11,17 @@ function formatTime(total) {
   return `${m}:${s}`;
 }
 
-function Tile({ name, stream, isVideo, self, muted, cameraOff, pending }) {
+function Tile({ name, avatar, stream, isVideo, self, muted, cameraOff, pending, mirror, sinkId }) {
   const ref = useRef(null);
 
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream || null;
   }, [stream, isVideo]);
+
+  // Remote voices play through the chosen speaker / earpiece / Bluetooth device
+  useEffect(() => {
+    if (!self) applySink(ref.current, sinkId);
+  }, [self, sinkId, stream, isVideo]);
 
   const showVideo = isVideo && stream && !pending && !(self && cameraOff);
 
@@ -24,7 +32,7 @@ function Tile({ name, stream, isVideo, self, muted, cameraOff, pending }) {
         <video
           ref={ref}
           className="gc-video"
-          style={{ visibility: showVideo ? 'visible' : 'hidden', transform: self ? 'scaleX(-1)' : undefined }}
+          style={{ visibility: showVideo ? 'visible' : 'hidden', transform: self && mirror ? 'scaleX(-1)' : undefined }}
           autoPlay
           playsInline
           muted={self}
@@ -32,7 +40,7 @@ function Tile({ name, stream, isVideo, self, muted, cameraOff, pending }) {
       )}
       {!showVideo && (
         <div className="gc-avatar-wrap">
-          <div className="avatar avatar-lg">{name.charAt(0)}</div>
+          <Avatar user={{ name, avatar }} className="avatar-lg" />
         </div>
       )}
       <div className="gc-label">
@@ -49,6 +57,7 @@ export default function GroupCallScreen({
   callType,
   myId,
   myName,
+  myAvatar,
   members,
   streams,
   localStream,
@@ -56,9 +65,13 @@ export default function GroupCallScreen({
   cameraOff,
   onToggleMute,
   onToggleCamera,
+  facing,
+  canSwitchCamera,
+  onSwitchCamera,
   onLeave,
 }) {
   const [seconds, setSeconds] = useState(0);
+  const output = useAudioOutput();
   const isVideo = callType === 'video';
 
   useEffect(() => {
@@ -76,11 +89,22 @@ export default function GroupCallScreen({
       </div>
 
       <div className={`gc-grid gc-n${Math.min(others.length + 1, 6)}`}>
-        <Tile name={myName} stream={localStream} isVideo={isVideo} self muted={muted} cameraOff={cameraOff} />
+        <Tile
+          name={myName}
+          avatar={myAvatar}
+          stream={localStream}
+          isVideo={isVideo}
+          self
+          muted={muted}
+          cameraOff={cameraOff}
+          mirror={facing === 'user'}
+        />
         {others.map((m) => (
           <Tile
             key={m.id}
             name={m.name}
+            avatar={m.avatar}
+            sinkId={output.activeId}
             stream={streams[m.id]}
             isVideo={isVideo}
             pending={m.status === 'pending'}
@@ -102,6 +126,14 @@ export default function GroupCallScreen({
             {cameraOff ? <VideoOff size={22} /> : <Video size={22} />}
           </button>
         )}
+
+        {isVideo && canSwitchCamera && (
+          <button className="btn" title="Switch camera" onClick={onSwitchCamera}>
+            <FlipCamera size={22} />
+          </button>
+        )}
+
+        <AudioOutputMenu output={output} />
 
         <button className="btn btn-red" title="Leave call" onClick={onLeave}>
           <PhoneOff size={24} />

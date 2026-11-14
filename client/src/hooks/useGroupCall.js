@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { startRinging, stopRinging } from '../utils/ringer';
 import { isAway, showNotification, startTitleFlash, stopTitleFlash } from '../utils/alerts';
-import { getMedia, iceServers, mediaErrorMessage } from '../utils/rtc';
+import {
+  cameraFacing,
+  getMedia,
+  iceServers as fallbackIceServers,
+  listCameras,
+  loadIceServers,
+  mediaErrorMessage,
+  openCamera,
+} from '../utils/rtc';
+import useWakeLock from './useWakeLock';
 
 /**
  * Group voice / video calls. Every participant keeps a direct WebRTC connection to every
@@ -20,7 +29,11 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
   const [muted, setMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
   const [notice, setNotice] = useState('');
+  const [facing, setFacing] = useState('user');
+  const [canSwitchCamera, setCanSwitchCamera] = useState(false);
 
+  const iceRef = useRef(fallbackIceServers); // STUN + TURN list from the server (see utils/rtc.js)
+  const switchingRef = useRef(false);
   const statusRef = useRef('idle');
   const roomRef = useRef(null);
   const inviteRef = useRef(null);
@@ -68,6 +81,9 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
     setInvite(null);
     setMuted(false);
     setCameraOff(false);
+    setFacing('user');
+    setCanSwitchCamera(false);
+    switchingRef.current = false;
     changeStatus('idle');
   }, [changeStatus, closePeer]);
 
@@ -82,7 +98,7 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
   const createPeer = useCallback(
     (peerId) => {
       closePeer(peerId);
-      const pc = new RTCPeerConnection({ iceServers });
+      const pc = new RTCPeerConnection({ iceServers: iceRef.current });
       localRef.current?.getTracks().forEach((track) => pc.addTrack(track, localRef.current));
 
       pc.onicecandidate = (e) => {
@@ -131,9 +147,11 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
       if (!socket || statusRef.current !== 'idle') return;
       setNotice('');
       try {
-        const stream = await getMedia(type);
+        const [stream, servers] = await Promise.all([getMedia(type), loadIceServers()]);
+        iceRef.current = servers;
         localRef.current = stream;
         setLocalStream(stream);
+        setFacing(cameraFacing(stream));
         changeStatus('starting');
         socket.emit('group:create', { invitees: users.map((u) => u.id), callType: type });
       } catch (err) {
@@ -149,7 +167,8 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
     const inv = inviteRef.current;
     if (!inv || !socket) return;
     try {
-      const stream = await getMedia(inv.callType);
+      const [stream, servers] = await Promise.all([getMedia(inv.callType), loadIceServers()]);
+      iceRef.current = servers;
       // The invitation may have ended while the permission prompt was open
       if (inviteRef.current?.roomId !== inv.roomId) {
         stream.getTracks().forEach((t) => t.stop());
@@ -157,6 +176,7 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
       }
       localRef.current = stream;
       setLocalStream(stream);
+      setFacing(cameraFacing(stream));
       stopRinging();
       socket.emit('group:join', { roomId: inv.roomId });
     } catch (err) {
@@ -189,6 +209,80 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
     tracks.forEach((t) => (t.enabled = !t.enabled));
     setCameraOff(tracks.length > 0 && !tracks[0].enabled);
   }, []);
+
+  // Front <-> back camera (or the next webcam on a laptop); the new picture goes to everyone in the call
+  const switchCamera = useCallback(async () => {
+    const stream = localRef.current;
+    const old = stream?.getVideoTracks()[0];
+    if (!old || switchingRef.current) return;
+    switchingRef.current = true;
+
+    const wasEnabled = old.enabled;
+    const oldSettings = old.getSettings ? old.getSettings() : {};
+    const current = cameraFacing(stream);
+    const wanted = current === 'user' ? 'environment' : 'user';
+
+    old.stop(); // phones can usually only open one camera at a time
+    let track = null;
+    try {
+      try {
+        track = await openCamera({ facing: wanted });
+      } catch {
+        const cams = await listCameras();
+        const i = cams.findIndex((c) => c.deviceId === oldSettings.deviceId);
+        const next = cams[(i + 1) % cams.length];
+        if (!next || next.deviceId === oldSettings.deviceId) throw new Error('no other camera');
+        track = await openCamera({ deviceId: next.deviceId });
+      }
+    } catch (err) {
+      console.warn('Could not switch camera', err);
+      try {
+        track = await openCamera({ deviceId: oldSettings.deviceId, facing: current });
+        setNotice("Couldn't switch the camera.");
+      } catch {
+        setNotice('The camera stopped working.');
+      }
+    }
+
+    if (track) {
+      track.enabled = wasEnabled;
+      await Promise.all(
+        [...pcs.current.values()].map((pc) => {
+          const sender = pc.getSenders().find((s) => s.track === old);
+          return sender ? sender.replaceTrack(track).catch((e) => console.warn('replaceTrack failed', e)) : null;
+        })
+      );
+      stream.removeTrack(old);
+      stream.addTrack(track);
+      const updated = new MediaStream(stream.getTracks());
+      localRef.current = updated;
+      setLocalStream(updated);
+      setFacing(cameraFacing(updated));
+    }
+    switchingRef.current = false;
+  }, []);
+
+  // Keep the phone's screen on while in the call
+  useWakeLock(status === 'active');
+
+  // Show the flip-camera button only when there is more than one camera
+  useEffect(() => {
+    if (!localStream || room?.callType !== 'video') {
+      setCanSwitchCamera(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const check = () =>
+      listCameras()
+        .then((cams) => !cancelled && setCanSwitchCamera(cams.length > 1))
+        .catch(() => {});
+    check();
+    navigator.mediaDevices?.addEventListener?.('devicechange', check);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices?.removeEventListener?.('devicechange', check);
+    };
+  }, [localStream, room]);
 
   // ---- sounds + background alerts for an invitation -----------------------
   useEffect(() => {
@@ -261,13 +355,13 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
       list.filter((m) => m.id !== myId && m.status === 'joined').forEach((m) => connectTo(m.id));
     };
 
-    const onMember = ({ roomId, userId, name, status: st }) => {
+    const onMember = ({ roomId, userId, name, avatar, status: st }) => {
       if (roomRef.current?.id !== roomId) return;
       setMembers((prev) => {
         const exists = prev.some((m) => m.id === userId);
         return exists
           ? prev.map((m) => (m.id === userId ? { ...m, status: st } : m))
-          : [...prev, { id: userId, name, status: st }];
+          : [...prev, { id: userId, name, avatar, status: st }];
       });
       if (st !== 'joined' && st !== 'pending') closePeer(userId);
       if (st === 'declined') setNotice(`${name} declined the group call.`);
@@ -373,5 +467,8 @@ export default function useGroupCall(socket, myId, { canRing = true } = {}) {
     leave,
     toggleMute,
     toggleCamera,
+    switchCamera,
+    facing,
+    canSwitchCamera,
   };
 }

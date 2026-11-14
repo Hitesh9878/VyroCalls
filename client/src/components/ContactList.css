@@ -69,6 +69,15 @@
   white-space: nowrap;
 }
 
+.contact-about {
+  color: var(--text);
+  opacity: 0.8;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .contact-actions {
   display: flex;
   gap: 6px;

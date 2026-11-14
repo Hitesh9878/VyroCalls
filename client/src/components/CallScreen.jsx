@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, PhoneOff, Record, Video, VideoOff } from './Icons';
+import { FlipCamera, Mic, MicOff, PhoneOff, Record, Video, VideoOff } from './Icons';
+import Avatar from './Avatar';
+import AudioOutputMenu from './AudioOutputMenu';
+import useAudioOutput, { applySink } from '../hooks/useAudioOutput';
 import './CallScreen.css';
 
 function formatTime(total) {
@@ -19,6 +22,10 @@ export default function CallScreen({
   recording,
   peerRecording,
   calleeOffline,
+  reconnecting,
+  facing,
+  canSwitchCamera,
+  onSwitchCamera,
   onToggleMute,
   onToggleCamera,
   onToggleRecording,
@@ -27,6 +34,7 @@ export default function CallScreen({
   const localRef = useRef(null);
   const remoteRef = useRef(null);
   const [seconds, setSeconds] = useState(0);
+  const output = useAudioOutput();
 
   const isVideo = callType === 'video';
 
@@ -38,6 +46,11 @@ export default function CallScreen({
   useEffect(() => {
     if (remoteRef.current) remoteRef.current.srcObject = remoteStream;
   }, [remoteStream, isVideo]);
+
+  // Play the other person's voice through the chosen speaker / earpiece / Bluetooth device
+  useEffect(() => {
+    applySink(remoteRef.current, output.activeId);
+  }, [output.activeId, remoteStream, isVideo]);
 
   // Call timer
   useEffect(() => {
@@ -56,6 +69,8 @@ export default function CallScreen({
         : 'Calling…'
       : status === 'connecting'
       ? 'Connecting…'
+      : reconnecting
+      ? 'Reconnecting…'
       : formatTime(seconds);
 
   const showRemoteVideo = isVideo && remoteStream && status === 'connected';
@@ -84,7 +99,7 @@ export default function CallScreen({
         )}
 
         <div className={`call-info ${showRemoteVideo ? 'overlay' : ''}`}>
-          {!showRemoteVideo && <div className="avatar avatar-lg">{peer.name.charAt(0)}</div>}
+          {!showRemoteVideo && <Avatar user={peer} className="avatar-lg" />}
           <div className="call-name">{peer.name}</div>
           <div className="call-status">{label}</div>
         </div>
@@ -93,7 +108,7 @@ export default function CallScreen({
           <video
             ref={localRef}
             className="call-local-video"
-            style={{ display: cameraOff ? 'none' : 'block' }}
+            style={{ display: cameraOff ? 'none' : 'block', transform: facing === 'user' ? 'scaleX(-1)' : 'none' }}
             autoPlay
             playsInline
             muted
@@ -119,6 +134,14 @@ export default function CallScreen({
             {cameraOff ? <VideoOff size={22} /> : <Video size={22} />}
           </button>
         )}
+
+        {isVideo && canSwitchCamera && (
+          <button className="btn" title="Switch camera" onClick={onSwitchCamera}>
+            <FlipCamera size={22} />
+          </button>
+        )}
+
+        <AudioOutputMenu output={output} />
 
         <button
           className={`btn ${recording ? 'recording' : ''}`}

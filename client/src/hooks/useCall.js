@@ -2,7 +2,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import useRecorder from './useRecorder';
 import { canPlayAudio, startRinging, stopRinging } from '../utils/ringer';
 import { isAway, showNotification, startTitleFlash, stopTitleFlash } from '../utils/alerts';
-import { getMedia, iceServers, mediaErrorMessage } from '../utils/rtc';
+import {
+  cameraFacing,
+  getMedia,
+  hasRelay,
+  listCameras,
+  loadIceServers,
+  mediaErrorMessage,
+  openCamera,
+} from '../utils/rtc';
+import useWakeLock from './useWakeLock';
+
+// A dropped connection (Wi-Fi -> 4G, a tunnel, a locked screen) gets this long to come back
+const GIVE_UP_MS = 25000;
+const MAX_ICE_RESTARTS = 3;
 
 /**
  * Handles the whole call lifecycle with WebRTC + Socket.IO signalling.
@@ -19,6 +32,9 @@ export default function useCall(socket) {
   const [notice, setNotice] = useState('');
   const [peerRecording, setPeerRecording] = useState(false); // the other person is recording
   const [calleeOffline, setCalleeOffline] = useState(false); // ringing someone who is offline (we emailed them)
+  const [reconnecting, setReconnecting] = useState(false); // the network dropped mid-call, trying to get back
+  const [facing, setFacing] = useState('user'); // which way my camera faces: 'user' (front) | 'environment' (back)
+  const [canSwitchCamera, setCanSwitchCamera] = useState(false); // this device has more than one camera
 
   const recorder = useRecorder({ onSaved: () => setNotice('Recording saved to your downloads.') });
   const stopRecorder = recorder.stop;
@@ -30,6 +46,11 @@ export default function useCall(socket) {
   const pendingIce = useRef([]);
   const incomingRef = useRef(null);
   const statusRef = useRef('idle');
+  const isCallerRef = useRef(false); // only the caller sends ICE-restart offers (stops both sides offering at once)
+  const everConnectedRef = useRef(false);
+  const restartsRef = useRef(0);
+  const timersRef = useRef({ disconnect: null, giveUp: null });
+  const switchingRef = useRef(false);
 
   const changeStatus = useCallback((next) => {
     statusRef.current = next;
@@ -38,6 +59,14 @@ export default function useCall(socket) {
 
   // Release camera/mic, close the connection and reset everything
   const cleanup = useCallback(() => {
+    clearTimeout(timersRef.current.disconnect);
+    clearTimeout(timersRef.current.giveUp);
+    timersRef.current = { disconnect: null, giveUp: null };
+    restartsRef.current = 0;
+    everConnectedRef.current = false;
+    isCallerRef.current = false;
+    switchingRef.current = false;
+
     const pc = pcRef.current;
     if (pc) {
       pc.onicecandidate = null;
@@ -62,6 +91,9 @@ export default function useCall(socket) {
     setCameraOff(false);
     setPeerRecording(false);
     setCalleeOffline(false);
+    setReconnecting(false);
+    setFacing('user');
+    setCanSwitchCamera(false);
     changeStatus('idle');
   }, [changeStatus, stopRecorder]);
 
@@ -77,9 +109,41 @@ export default function useCall(socket) {
     }
   }, []);
 
+  // The connection dropped: ask for fresh network paths (the caller sends the new offer),
+  // and hang up properly if nothing works within GIVE_UP_MS.
+  const restartIce = useCallback(
+    async (pc, peerId) => {
+      if (pcRef.current !== pc || statusRef.current === 'idle') return;
+
+      const timers = timersRef.current;
+      if (!timers.giveUp) {
+        timers.giveUp = setTimeout(() => {
+          timers.giveUp = null;
+          if (pcRef.current === pc && pc.connectionState !== 'connected') {
+            socket.emit('call:end', { to: peerId });
+            setNotice('Connection lost. Check your network and try again.');
+            cleanup();
+          }
+        }, GIVE_UP_MS);
+      }
+
+      if (!isCallerRef.current || restartsRef.current >= MAX_ICE_RESTARTS) return;
+      restartsRef.current += 1;
+      try {
+        if (pc.restartIce) pc.restartIce();
+        const offer = await pc.createOffer({ iceRestart: true });
+        await pc.setLocalDescription(offer);
+        socket.emit('call:negotiate', { to: peerId, description: offer });
+      } catch (e) {
+        console.warn('ICE restart failed', e);
+      }
+    },
+    [socket, cleanup]
+  );
+
   const createPeer = useCallback(
-    (peerId, stream) => {
-      const pc = new RTCPeerConnection({ iceServers });
+    (peerId, stream, servers) => {
+      const pc = new RTCPeerConnection({ iceServers: servers });
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
 
       pc.onicecandidate = (e) => {
@@ -90,16 +154,54 @@ export default function useCall(socket) {
         setRemoteStream(e.streams[0]);
       };
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') changeStatus('connected');
-        if (pc.connectionState === 'failed') {
-          socket.emit('call:end', { to: peerId });
-          setNotice('Connection failed. Check your network and try again.');
-          cleanup();
+        const state = pc.connectionState;
+        const timers = timersRef.current;
+        clearTimeout(timers.disconnect);
+
+        if (state === 'connected') {
+          clearTimeout(timers.giveUp);
+          timers.giveUp = null;
+          restartsRef.current = 0;
+          everConnectedRef.current = true;
+          setReconnecting(false);
+          changeStatus('connected');
+        } else if (state === 'disconnected' && everConnectedRef.current) {
+          // Usually a short blip: wait a few seconds, then ask for new network paths
+          setReconnecting(true);
+          timers.disconnect = setTimeout(() => restartIce(pc, peerId), 3000);
+        } else if (state === 'failed') {
+          if (everConnectedRef.current) {
+            setReconnecting(true);
+            restartIce(pc, peerId);
+          } else {
+            // Never got through at all. Look at what this phone managed to gather to say why.
+            (async () => {
+              let relayCandidate = false;
+              try {
+                const stats = await pc.getStats();
+                stats.forEach((r) => {
+                  if (r.type === 'local-candidate' && r.candidateType === 'relay') relayCandidate = true;
+                });
+              } catch {
+                // ignore
+              }
+              console.warn('[call] could not connect. TURN configured on server:', hasRelay(), '| relay candidate found:', relayCandidate);
+              socket.emit('call:end', { to: peerId });
+              setNotice(
+                !hasRelay()
+                  ? "Couldn't connect: the server has no TURN relay set up, which phones on mobile data need."
+                  : !relayCandidate
+                  ? "Couldn't connect: the TURN relay did not respond. Check its address and credentials."
+                  : "Couldn't connect, even through the relay. Check both internet connections and try again."
+              );
+              cleanup();
+            })();
+          }
         }
       };
       return pc;
     },
-    [socket, changeStatus, cleanup]
+    [socket, changeStatus, cleanup, restartIce]
   );
 
   // ---- actions -----------------------------------------------------------
@@ -108,16 +210,19 @@ export default function useCall(socket) {
       if (!socket || statusRef.current !== 'idle') return;
       setNotice('');
       try {
-        const stream = await getMedia(type);
+        const [stream, servers] = await Promise.all([getMedia(type), loadIceServers()]);
         localRef.current = stream;
         peerRef.current = contactUser;
+        isCallerRef.current = true;
 
         setLocalStream(stream);
         setPeer(contactUser);
         setCallType(type);
         changeStatus('calling');
 
-        const pc = createPeer(contactUser.id, stream);
+        setFacing(cameraFacing(stream));
+
+        const pc = createPeer(contactUser.id, stream, servers);
         pcRef.current = pc;
 
         const offer = await pc.createOffer();
@@ -137,7 +242,7 @@ export default function useCall(socket) {
     if (!incoming || !socket) return;
 
     try {
-      const stream = await getMedia(incoming.callType);
+      const [stream, servers] = await Promise.all([getMedia(incoming.callType), loadIceServers()]);
 
       // The caller may have hung up while the permission prompt was open
       if (peerRef.current?.id !== incoming.from.id) {
@@ -147,9 +252,10 @@ export default function useCall(socket) {
 
       localRef.current = stream;
       setLocalStream(stream);
+      setFacing(cameraFacing(stream));
       changeStatus('connecting');
 
-      const pc = createPeer(incoming.from.id, stream);
+      const pc = createPeer(incoming.from.id, stream, servers);
       pcRef.current = pc;
 
       await pc.setRemoteDescription(incoming.offer);
@@ -188,6 +294,56 @@ export default function useCall(socket) {
     setCameraOff(tracks.length > 0 && !tracks[0].enabled);
   }, []);
 
+  // Front <-> back camera (or the next webcam on a laptop) without interrupting the call
+  const switchCamera = useCallback(async () => {
+    const stream = localRef.current;
+    const old = stream?.getVideoTracks()[0];
+    if (!old || switchingRef.current) return;
+    switchingRef.current = true;
+
+    const wasEnabled = old.enabled;
+    const oldSettings = old.getSettings ? old.getSettings() : {};
+    const current = cameraFacing(stream);
+    const wanted = current === 'user' ? 'environment' : 'user';
+
+    old.stop(); // release it first: most phones can only open one camera at a time
+    let track = null;
+    try {
+      try {
+        track = await openCamera({ facing: wanted });
+      } catch {
+        // No camera that faces that way (a laptop with two webcams, say): step to the next device
+        const cams = await listCameras();
+        const i = cams.findIndex((c) => c.deviceId === oldSettings.deviceId);
+        const next = cams[(i + 1) % cams.length];
+        if (!next || next.deviceId === oldSettings.deviceId) throw new Error('no other camera');
+        track = await openCamera({ deviceId: next.deviceId });
+      }
+    } catch (err) {
+      console.warn('Could not switch camera', err);
+      try {
+        track = await openCamera({ deviceId: oldSettings.deviceId, facing: current }); // bring the old one back
+        setNotice("Couldn't switch the camera.");
+      } catch {
+        setNotice('The camera stopped working.');
+      }
+    }
+
+    if (track) {
+      track.enabled = wasEnabled;
+      const sender = pcRef.current?.getSenders().find((s) => s.track === old);
+      if (sender) await sender.replaceTrack(track).catch((e) => console.warn('replaceTrack failed', e));
+
+      stream.removeTrack(old);
+      stream.addTrack(track);
+      const updated = new MediaStream(stream.getTracks());
+      localRef.current = updated;
+      setLocalStream(updated);
+      setFacing(cameraFacing(updated));
+    }
+    switchingRef.current = false;
+  }, []);
+
   const toggleRecording = useCallback(() => {
     const other = peerRef.current;
     if (recorder.recording) {
@@ -210,6 +366,33 @@ export default function useCall(socket) {
       setNotice('Recording is not supported in this browser.');
     }
   }, [socket, recorder, callType]);
+
+  // Keep the phone's screen on during a call (a locked screen kills the connection)
+  useWakeLock(['calling', 'connecting', 'connected'].includes(status));
+
+  // Show the flip-camera button only when there is more than one camera
+  useEffect(() => {
+    if (!localStream || callType !== 'video') {
+      setCanSwitchCamera(false);
+      return undefined;
+    }
+    let cancelled = false;
+    const check = () =>
+      listCameras()
+        .then((cams) => !cancelled && setCanSwitchCamera(cams.length > 1))
+        .catch(() => {});
+    check();
+    navigator.mediaDevices?.addEventListener?.('devicechange', check);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices?.removeEventListener?.('devicechange', check);
+    };
+  }, [localStream, callType]);
+
+  // Warm the ICE-server cache so starting or answering a call does not wait for it
+  useEffect(() => {
+    if (socket) loadIceServers();
+  }, [socket]);
 
   // ---- sounds ------------------------------------------------------------
   // Incoming ring for the callee, ringback tone for the caller, silence otherwise
@@ -295,6 +478,25 @@ export default function useCall(socket) {
       }
     };
 
+    // The other side restarted ICE after a network change: answer it (or take their answer)
+    const onNegotiate = async ({ description }) => {
+      const pc = pcRef.current;
+      const peerId = peerRef.current?.id;
+      if (!pc || !peerId || !description) return;
+      try {
+        if (description.type === 'offer') {
+          await pc.setRemoteDescription(description);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          socket.emit('call:negotiate', { to: peerId, description: answer });
+        } else if (description.type === 'answer') {
+          await pc.setRemoteDescription(description);
+        }
+      } catch (e) {
+        console.warn('Renegotiation failed', e);
+      }
+    };
+
     const onRejected = () => {
       if (statusRef.current === 'idle') return; // stale event (e.g. another tab of mine)
       setNotice(`${peerRef.current?.name || 'The user'} declined the call.`);
@@ -359,6 +561,7 @@ export default function useCall(socket) {
     socket.on('call:incoming', onIncoming);
     socket.on('call:answered', onAnswered);
     socket.on('call:ice', onIce);
+    socket.on('call:negotiate', onNegotiate);
     socket.on('call:rejected', onRejected);
     socket.on('call:ended', onEnded);
     socket.on('call:offline-ringing', onOfflineRinging);
@@ -375,6 +578,7 @@ export default function useCall(socket) {
       socket.off('call:incoming', onIncoming);
       socket.off('call:answered', onAnswered);
       socket.off('call:ice', onIce);
+      socket.off('call:negotiate', onNegotiate);
       socket.off('call:rejected', onRejected);
       socket.off('call:ended', onEnded);
       socket.off('call:offline-ringing', onOfflineRinging);
@@ -408,6 +612,9 @@ export default function useCall(socket) {
     cameraOff,
     notice,
     calleeOffline,
+    reconnecting,
+    facing,
+    canSwitchCamera,
     recording: recorder.recording,
     peerRecording,
     startCall,
@@ -416,6 +623,7 @@ export default function useCall(socket) {
     hangUp,
     toggleMute,
     toggleCamera,
+    switchCamera,
     toggleRecording,
   };
 }

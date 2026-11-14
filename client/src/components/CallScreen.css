@@ -72,9 +72,11 @@
 
 .call-controls {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   gap: 18px;
   padding: 20px;
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
   background: rgba(15, 20, 25, 0.9);
 }
 
@@ -93,6 +95,18 @@
 @media (max-width: 520px) {
   .call-local-video {
     width: 96px;
+  }
+
+  /* up to six buttons now (mute, camera, flip, sound, record, end) */
+  .call-controls {
+    gap: 10px;
+    padding: 14px 10px;
+    padding-bottom: max(14px, env(safe-area-inset-bottom));
+  }
+
+  .call-controls .btn {
+    width: 48px;
+    height: 48px;
   }
 }
 

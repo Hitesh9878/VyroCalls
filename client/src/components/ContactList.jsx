@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Ban, Phone, Search, Trash, Video, X } from './Icons';
+import Avatar from './Avatar';
 import './ContactList.css';
 
 export default function ContactList({ contacts, online, busy, onCall, onRemove, onBlock }) {
@@ -53,12 +54,13 @@ export default function ContactList({ contacts, online, busy, onCall, onRemove, 
         return (
           <div className="contact-item" key={c.id}>
             <div className="contact-avatar-wrap">
-              <div className="avatar">{c.user.name.charAt(0)}</div>
+              <Avatar user={c.user} />
               <span className={`contact-status-dot ${isOnline ? 'online' : ''}`} />
             </div>
 
             <div className="contact-info">
               <div className="contact-name">{c.user.name}</div>
+              {c.user.about && <div className="contact-about">{c.user.about}</div>}
               <div className="contact-email">{isOnline ? 'Online' : `Offline · ${c.user.email}`}</div>
             </div>
 

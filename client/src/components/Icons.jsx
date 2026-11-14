@@ -154,6 +154,35 @@ export const Record = (p) => (
   </Svg>
 );
 
+// Two arrows chasing each other: switch between front and back camera
+export const FlipCamera = (p) => (
+  <Svg {...p}>
+    <polyline points="23 4 23 10 17 10" />
+    <polyline points="1 20 1 14 7 14" />
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+  </Svg>
+);
+
+export const Speaker = (p) => (
+  <Svg {...p}>
+    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+    <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
+  </Svg>
+);
+
+export const Pencil = (p) => (
+  <Svg {...p}>
+    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+  </Svg>
+);
+
+export const Camera = (p) => (
+  <Svg {...p}>
+    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+    <circle cx="12" cy="13" r="4" />
+  </Svg>
+);
+
 export const Ban = (p) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="10" />

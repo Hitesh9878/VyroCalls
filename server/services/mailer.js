@@ -124,4 +124,63 @@ async function sendGroupInvite({ to, name, hostName, callType, link }) {
   });
 }
 
-module.exports = { sendOtp, sendIncomingCall, sendMissedCall, sendGroupInvite, APP_NAME };
+const button = (link, label) =>
+  `<p><a href="${escapeHtml(link)}" style="display:inline-block;padding:12px 22px;background:#1b4fd8;color:#fff;border-radius:8px;text-decoration:none;font-weight:700">${label}</a></p>`;
+
+// Someone sent you a contact request
+async function sendRequestReceived({ to, name, otherName, link }) {
+  await sendMail({
+    to,
+    toName: name,
+    subject: `${otherName} sent you a contact request on ${APP_NAME}`,
+    text: `Hi ${name},\n\n${otherName} wants to connect with you on ${APP_NAME}. Open the app and go to Requests to accept or decline.\n\n${link}`,
+    html: layout(
+      `<p>Hi ${escapeHtml(name)},</p>` +
+        `<p style="font-size:18px"><strong>${escapeHtml(otherName)}</strong> sent you a contact request.</p>` +
+        `<p style="color:#5b6579;font-size:13px">Once you accept, the two of you can call each other.</p>` +
+        button(link, `Open ${APP_NAME} &amp; respond`)
+    ),
+  });
+}
+
+// The person you sent a request to accepted it
+async function sendRequestAccepted({ to, name, otherName, link }) {
+  await sendMail({
+    to,
+    toName: name,
+    subject: `${otherName} accepted your contact request on ${APP_NAME}`,
+    text: `Hi ${name},\n\n${otherName} accepted your contact request. You can now call each other on ${APP_NAME}.\n\n${link}`,
+    html: layout(
+      `<p>Hi ${escapeHtml(name)},</p>` +
+        `<p style="font-size:18px"><strong>${escapeHtml(otherName)}</strong> <strong>accepted</strong> your contact request.</p>` +
+        `<p style="color:#5b6579;font-size:13px">You can now call each other.</p>` +
+        button(link, `Open ${APP_NAME} &amp; call`)
+    ),
+  });
+}
+
+// The person you sent a request to declined it
+async function sendRequestDeclined({ to, name, otherName, link }) {
+  await sendMail({
+    to,
+    toName: name,
+    subject: `${otherName} declined your contact request on ${APP_NAME}`,
+    text: `Hi ${name},\n\n${otherName} declined your contact request on ${APP_NAME}.\n\n${link}`,
+    html: layout(
+      `<p>Hi ${escapeHtml(name)},</p>` +
+        `<p style="font-size:18px"><strong>${escapeHtml(otherName)}</strong> <strong>declined</strong> your contact request.</p>` +
+        button(link, `Open ${APP_NAME}`)
+    ),
+  });
+}
+
+module.exports = {
+  sendOtp,
+  sendIncomingCall,
+  sendMissedCall,
+  sendGroupInvite,
+  sendRequestReceived,
+  sendRequestAccepted,
+  sendRequestDeclined,
+  APP_NAME,
+};

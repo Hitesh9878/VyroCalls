@@ -1,10 +1,11 @@
 import { Ban, Check, X } from './Icons';
+import Avatar from './Avatar';
 import './RequestsPanel.css';
 
 function Row({ user, children, sub }) {
   return (
     <div className="req-row">
-      <div className="avatar">{user.name.charAt(0)}</div>
+      <Avatar user={user} />
       <div className="req-who">
         <div className="contact-name">{user.name}</div>
         <div className="contact-email">{sub || user.email}</div>
